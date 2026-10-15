@@ -39,3 +39,6 @@ ddddocr
 # bip39
 # mnemonic
 # scikit-learn           # steam model TRAINING only (inference needs no sklearn)
+
+# brave_pow (Brave Search API dashboard) Argon2id proof-of-work solver
+argon2-cffi

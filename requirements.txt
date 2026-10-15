@@ -36,3 +36,6 @@ numpy
 substrate-interface
 bip39
 mnemonic
+
+# brave_pow (Brave Search API dashboard) Argon2id proof-of-work solver
+argon2-cffi

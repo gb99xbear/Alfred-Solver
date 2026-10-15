@@ -79,7 +79,7 @@ app = FastAPI(
 # the endpoint proceeds — real enforcement stays at the Caddy layer (public domain only).
 _bearer = HTTPBearer(auto_error=False, description="Bearer token (required on the public "
                      "domain; enforced by the reverse proxy). Ignored for local calls.")
-SUPPORTED = ["turnstile", "recaptcha", "hcaptcha", "cloudflare", "awswaf", "botguard", "datadome", "perimeterx", "akamai", "aliyun", "arkose", "x5sec", "tencent", "geetest", "kasada", "mtcaptcha", "altcha", "cybersiara", "imperva", "friendly", "geetest_v3", "image_to_text"] + ["cap", "anubis", "mcaptcha", "procaptcha", "rotate", "yidun", "dingxiang", "shumei", "douyin", "vaptcha", "goaway", "recaptcha_audio", "cerberus", "yandex", "hcaptcha_enterprise", "zhihu", "steam", "grid", "coordinates", "draw_around", "drag_drop", "bounding_box", "tspd", "vk", "cloudflare_challenge", "basilisk", "binance", "captchafox"]
+SUPPORTED = ["turnstile", "recaptcha", "hcaptcha", "cloudflare", "awswaf", "botguard", "datadome", "perimeterx", "akamai", "aliyun", "arkose", "x5sec", "tencent", "geetest", "kasada", "mtcaptcha", "altcha", "cybersiara", "imperva", "friendly", "geetest_v3", "image_to_text"] + ["cap", "anubis", "mcaptcha", "procaptcha", "rotate", "yidun", "dingxiang", "shumei", "douyin", "vaptcha", "goaway", "recaptcha_audio", "cerberus", "yandex", "hcaptcha_enterprise", "zhihu", "steam", "grid", "coordinates", "draw_around", "drag_drop", "bounding_box", "tspd", "vk", "cloudflare_challenge", "basilisk", "binance", "captchafox", "brave_pow"]
 # Page-level solvers that harvest a cookie/token from the live page (no sitekey needed).
 _PAGE_LEVEL = ("cloudflare", "awswaf", "botguard", "datadome", "perimeterx", "akamai", "x5sec")
 # Solvers that supply their own canonical URL (caller need not pass `url`).
@@ -95,6 +95,8 @@ _solve_log = deque(maxlen=100)
 # current tasks by id rather than a single global that they'd clobber.
 _solve_current: dict = {}
 _task_ids = itertools.count(1)
+_jobs_mem: dict = {}
+_job_backend = None
 
 
 def _is_solved(result: dict) -> bool:
@@ -104,7 +106,8 @@ def _is_solved(result: dict) -> bool:
     a truthy value in ANY of these = solved.
     """
     return bool(result.get("token") or result.get("cf_clearance")
-                or result.get("verify_success") or result.get("success"))
+                or result.get("verify_success") or result.get("success")
+                or (isinstance(result.get("solutions"), dict) and result.get("solutions")))
 
 
 def _log_solve(type_: str, sitekey: Optional[str], url: str, result: dict):
@@ -805,6 +808,12 @@ async def _dispatch(req: SolveRequest) -> dict:
                                proxy=req.proxy, timeout_s=req.timeout_s or 90)
         return {"type": "anubis", **r}
 
+    if req.type == "brave_pow":
+        from solvers.brave_pow.solve import solve_brave_pow
+        r = await solve_brave_pow(challenge_json=req.challenge_json,
+                                  url=req.url, timeout_s=req.timeout_s or 90)
+        return {"type": "brave_pow", **r}
+
     if req.type == "mcaptcha":
         from solvers.mcaptcha_pow.solve import solve_mcaptcha
         r = await solve_mcaptcha(challenge_json=req.challenge_json,
@@ -1136,7 +1145,7 @@ def _precheck(req: SolveRequest) -> None:
         raise HTTPException(400, "scene_id and prefix are required for type=aliyun")
     if req.type == "arkose" and not req.public_key:
         raise HTTPException(400, "public_key is required for type=arkose")
-    if req.type not in _PAGE_LEVEL and req.type not in ("aliyun", "arkose", "tencent", "geetest", "kasada", "mtcaptcha", "altcha", "cybersiara", "imperva", "friendly", "geetest_v3", "image_to_text", "cap", "anubis", "mcaptcha", "yidun", "dingxiang", "shumei", "douyin", "vaptcha", "rotate", "goaway", "recaptcha_audio", "cerberus", "yandex", "hcaptcha_enterprise", "zhihu", "steam", "grid", "coordinates", "draw_around", "drag_drop", "bounding_box", "tspd", "vk", "cloudflare_challenge", "basilisk", "binance", "captchafox") and not req.sitekey:
+    if req.type not in _PAGE_LEVEL and req.type not in ("aliyun", "arkose", "tencent", "geetest", "kasada", "mtcaptcha", "altcha", "cybersiara", "imperva", "friendly", "geetest_v3", "image_to_text", "cap", "anubis", "mcaptcha", "yidun", "dingxiang", "shumei", "douyin", "vaptcha", "rotate", "goaway", "recaptcha_audio", "cerberus", "yandex", "hcaptcha_enterprise", "zhihu", "steam", "grid", "coordinates", "draw_around", "drag_drop", "bounding_box", "tspd", "vk", "cloudflare_challenge", "basilisk", "binance", "captchafox", "brave_pow") and not req.sitekey:
         raise HTTPException(400, f"sitekey is required for type={req.type}")
     _validate_urls(req)
 
@@ -1337,6 +1346,14 @@ async def pool_check(deep: bool = Query(False)):
     st = get_pool().status()
     return {"checked": len(results), "results": results,
             "size": st["size"], "healthy": st["healthy"]}
+
+
+# Register legacy compat endpoints (task-based API for existing farmers)
+try:
+    from compat_endpoints import register_compat_routes
+    register_compat_routes(app)
+except Exception as e:
+    log.warning("Compat endpoints not registered: %s", e)
 
 
 if __name__ == "__main__":

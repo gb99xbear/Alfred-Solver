@@ -45,3 +45,5 @@ solvers/recaptcha_audio/models/
 
 # stray eval scratch
 _tmp_eval.js
+server.py.bak*
+*.bak-*

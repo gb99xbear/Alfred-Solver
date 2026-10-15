@@ -2,7 +2,7 @@
 
 # 🔐 CF-Solver
 
-**Self-hosted captcha-solving sidecar — 50 challenge types, zero per-solve cost.**
+**Self-hosted captcha-solving sidecar — 51 challenge types, zero per-solve cost.**
 
 > ⚠️ **Educational purposes only.** This project exists to study how anti-bot
 > challenges work and to test automation research in a controlled setting.
@@ -47,7 +47,7 @@ curl -s -X POST http://localhost:8877/solve -H 'Content-Type: application/json' 
 > `WITH_ARKOSE=1 ./install.sh` to also pull the optional 1.4 GB Arkose models.
 
 
-## 🧩 Supported types — 50
+## 🧩 Supported types — 51
 
 Legend:
 
@@ -96,6 +96,7 @@ Legend:
 | ✅ | `cap` | PoW solution | verified with a generated challenge |
 | ✅ | `anubis` | PoW solution | verified with a generated challenge |
 | ✅ | `mcaptcha` | PoW solution | verified with a generated config |
+| ✅ | `brave_pow` | PoW solution | Brave Search API dashboard (Argon2id) — end-to-end |
 | ✅ | `goaway` | PoW solution | verified with a generated challenge |
 | ✅ | `rotate` | rotation angle | ships its own ONNX model |
 | ✅ | `image_to_text` | OCR text | ddddocr, raw base64 or data-URI |
@@ -282,7 +283,7 @@ Reality check on a free tier:
 
 | | works | why |
 |---|---|---|
-| PoW types (`cap`, `anubis`, `mcaptcha`, `procaptcha`, `goaway`, `altcha`) | ✅ | pure compute, no browser |
+| PoW types (`cap`, `anubis`, `mcaptcha`, `procaptcha`, `goaway`, `altcha`, `brave_pow`) | ✅ | pure compute, no browser |
 | `image_to_text`, `rotate`, `cerberus` | ✅ | ONNX/OpenCV only |
 | `turnstile`, `recaptcha`, `hcaptcha`, `geetest`, `tencent` | ✅ | browser-backed; a datacenter IP is fine |
 | `datadome`, `akamai`, `kasada`, `cybersiara` | ❌ | datacenter IP gets scored regardless of fingerprint |
