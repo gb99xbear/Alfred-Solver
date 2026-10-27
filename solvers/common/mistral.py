@@ -29,9 +29,42 @@ _ROTATE_STATUS = {401, 403, 429}
 _COOLDOWN_S = 60  # wall-clock park duration for a failed key
 
 
+
+def _parse_sse(raw: str) -> str:
+    """Parse respons SSE -> teks gabungan. Dipakai bila gateway stream."""
+    acc = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        payload = line[5:].strip()
+        if payload == "[DONE]":
+            break
+        try:
+            d = json.loads(payload)
+        except Exception:
+            continue
+        ch = (d.get("choices") or [{}])[0]
+        piece = ((ch.get("delta") or {}).get("content")
+                 or (ch.get("message") or {}).get("content") or "")
+        if piece:
+            acc.append(piece)
+    return "".join(acc).strip()
+
+
 class KeyPool:
-    def __init__(self, keyfile: str, model: str = _DEFAULT_MODEL,
-                 start_index: int = 0):
+    def __init__(self, keyfile: str = "", model: str = _DEFAULT_MODEL,
+                 start_index: int = 0, endpoint: str = "",
+                 api_key: str = ""):
+        # Single-key mode: caller passes api_key + endpoint (e.g. 9Router/Gemini)
+        if api_key:
+            self.keys = [api_key]
+            self.model = model
+            self.endpoint = endpoint or _ENDPOINT
+            self._lock = threading.Lock()
+            self._cursor = itertools.cycle([api_key])
+            self._dead: dict[str, float] = {}
+            return
         p = Path(keyfile)
         raw = p.read_text().splitlines() if p.exists() else []
         keys = [k.strip() for k in raw if k.strip() and not k.strip().startswith("#")]
@@ -41,6 +74,7 @@ class KeyPool:
         # Empty pool allowed at construct time (ONNX-only recaptcha path).
         # classify/ask still raise if no keys when vision is actually needed.
         self.model = model
+        self.endpoint = endpoint or _ENDPOINT
         self._lock = threading.Lock()
         # round-robin cursor, started at a caller-chosen offset to spread load
         if self.keys:
@@ -87,16 +121,21 @@ class KeyPool:
                 }).encode()
 
         last_err = None
-        for _ in range(min(max_keys, len(self.keys))):
+        for _ in range(min(max_keys, max(1, len(self.keys)))):
             key = self._next_live_key()
             req = urllib.request.Request(
-                _ENDPOINT, data=body,
+                self.endpoint, data=body,
                 headers={"Content-Type": "application/json",
                          "Authorization": "Bearer " + key})
             try:
-                with urllib.request.urlopen(req, timeout=timeout) as r:
-                    data = json.loads(r.read())
-                txt = data["choices"][0]["message"]["content"]
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    raw = resp.read().decode("utf-8", "replace")
+                if raw.lstrip().startswith("data:"):
+                    # gateway pulangkan SSE walaupun stream=false
+                    txt = _parse_sse(raw)
+                else:
+                    data = json.loads(raw)
+                    txt = data["choices"][0]["message"]["content"]
                 if isinstance(txt, list):
                     txt = ' '.join(p.get('text', '') for p in txt if isinstance(p, dict))
                 return txt.strip().lower()

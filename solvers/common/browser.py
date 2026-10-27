@@ -108,6 +108,26 @@ def browser_kwargs(prefix: str, proxy: str | None = None) -> dict:
     return kw
 
 
+def context_kwargs(storage_state=None, user_agent: str | None = None) -> dict:
+    """Extra kwargs for browser.new_context().
+
+    `storage_state` accepts a path or a dict in Playwright storage-state form:
+
+        {"cookies": [{"name","value","domain","path",...}],
+         "origins": [{"origin","localStorage":[{"name","value"}]}]}
+
+    Needed for sites that bind the captcha challenge to the caller's session
+    (Mobrog reCAPTCHA Enterprise returns HTML for cookie-less audio URLs, and
+    escalates to an unsolvable image grid when the session is unknown).
+    """
+    kw: dict = {}
+    if storage_state:
+        kw["storage_state"] = storage_state
+    if user_agent:
+        kw["user_agent"] = user_agent
+    return kw
+
+
 def _normalize_proxy(proxy: str | dict) -> str | dict:
     """Convert http://user:pass@host:port → {server, username, password} when needed."""
     if isinstance(proxy, dict):

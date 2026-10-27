@@ -158,8 +158,8 @@ async def _solve_challenge(page) -> bool:
 
 # ── Main solver: checkbox (route-intercept) ───────────────────────────
 
-async def solve_hcaptcha(sitekey: str, url: str, max_attempts: int = 3,
-                         proxy: str = None) -> dict:
+async def solve_hcaptcha(sitekey: str, url: str, max_attempts: int = 15,
+                         proxy: str = None, deadline_s: float = 600.0) -> dict:
     """Solve hCaptcha checkbox via route interception.
 
     Renders the widget on an intercepted page, auto-clicks the checkbox
@@ -181,7 +181,13 @@ async def solve_hcaptcha(sitekey: str, url: str, max_attempts: int = 3,
                 await asyncio.sleep(3)
 
                 for attempt in range(1, max_attempts + 1):
-                    log.info("hCaptcha attempt %d/%d", attempt, max_attempts)
+                    spent = time.monotonic() - t0
+                    if spent > deadline_s:
+                        log.warning("hCaptcha deadline %.0fs reached at attempt %d",
+                                    deadline_s, attempt)
+                        break
+                    log.info("hCaptcha attempt %d/%d (%.0fs used)", attempt,
+                             max_attempts, spent)
 
                     # Try auto-populate (passive/no-challenge config)
                     token = await _get_hcaptcha_token(page, max_attempts=5)
@@ -204,13 +210,13 @@ async def solve_hcaptcha(sitekey: str, url: str, max_attempts: int = 3,
                         if not solved:
                             await _close_challenge(page)
 
-                    token = await _get_hcaptcha_token(page, max_attempts=15)
+                    token = await _get_hcaptcha_token(page, max_attempts=8)
                     if token:
                         return {"token": token, "expires_in": 120,
                                 "elapsed": round(time.monotonic() - t0, 1),
                                 "method": "route"}
 
-                    await asyncio.sleep(3 * attempt)  # backoff
+                    await asyncio.sleep(1.5 * attempt)  # backoff
 
                 return {"error": "No token obtained",
                         "elapsed": round(time.monotonic() - t0, 1)}

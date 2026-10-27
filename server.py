@@ -219,6 +219,14 @@ class SolveRequest(BaseModel):
         None, description="Turnstile action, or reCAPTCHA v3/invisible action. "
         "For hCaptcha, the literal \"invisible\" selects the invisible-execute path.")
     cdata: Optional[str] = Field(None, description="Turnstile customer data bound into the token.")
+    storage_state: Optional[dict] = Field(
+        None,
+        description="Playwright storage-state (cookies + origins) of the CALLER's session. "
+        "Sites that bind the captcha to the session (reCAPTCHA Enterprise on registration "
+        "forms) return HTML instead of audio, or escalate to an image grid, when the solver "
+        "arrives cookie-less. Pass the same cookies your automation uses, and the same proxy.",
+        examples=[{"cookies": [{"name": "__cf_bm", "value": "...", "domain": ".example.com",
+                                "path": "/"}]}]),
     real_page: Optional[bool] = Field(
         False, description="Solve on the live target page (navigate + drive) instead of a stub.")
     timeout_s: Optional[int] = Field(
@@ -1006,7 +1014,9 @@ async def _dispatch(req: SolveRequest) -> dict:
             r = await solve_recaptcha_v2_realpage(
                 req.url, req.sitekey, actions, fetches,
                 timeout_s=req.timeout_s, proxy=req.proxy,
-                classifier=req.classifier)
+                classifier=req.classifier,
+                storage_state=req.storage_state,
+                enterprise=bool(req.enterprise))
         else:
             r = await solve_recaptcha_v2(
                 req.sitekey, req.url, enterprise=req.enterprise,

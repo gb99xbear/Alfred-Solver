@@ -98,8 +98,11 @@ _solve_lock = asyncio.Semaphore(2)  # allow 2 parallel recaptcha browsers (was L
 
 # Address the iframes by title so frame_locator re-resolves them on every action —
 # immune to reCAPTCHA reloading the iframe.
-_ANCHOR_IFRAME = "iframe[title='reCAPTCHA']"
-_BFRAME_IFRAME = "iframe[title*='recaptcha challenge']"
+# match BOTH classic (api2) and Enterprise anchors; src-based survives
+# differing title attributes on Enterprise deployments (Mobrog, Toluna…)
+_ANCHOR_IFRAME = "iframe[src*='recaptcha'][src*='anchor'], iframe[title='reCAPTCHA']"
+_BFRAME_IFRAME = ("iframe[src*='recaptcha'][src*='bframe'], "
+                  "iframe[title*='recaptcha challenge']")
 
 # v3 / invisible / Enterprise page: load the render lib then execute(). Built inline
 # (structure differs from the v2 template). Enterprise just swaps in enterprise.js and
@@ -323,9 +326,11 @@ async def solve_recaptcha_v3_realpage(url: str, sitekey: str, action: str = "sub
     ns = "enterprise" if enterprise else "standard"
     async with _solve_lock:
         async with await cloakbrowser.launch_async(**_browser_kwargs(proxy)) as browser:
-            page = await browser.new_page()
+            _ctx_kw = context_kwargs(storage_state)
+            _ctx = await browser.new_context(**_ctx_kw) if _ctx_kw else None
+            page = await (_ctx.new_page() if _ctx else browser.new_page())
             try:
-                await page.goto(url, wait_until="domcontentloaded", timeout=45000)
+                await page.goto(url, wait_until="domcontentloaded", timeout=90000)
                 if pre_actions:
                     await run_pre_actions(page, pre_actions)
                 await asyncio.sleep(2)
@@ -502,7 +507,7 @@ async def solve_recaptcha_invisible_realpage(
             page = await browser.new_page()
             try:
                 try:
-                    await page.goto(url, wait_until="domcontentloaded", timeout=45000)
+                    await page.goto(url, wait_until="domcontentloaded", timeout=90000)
                 except Exception as e:
                     return {"error": f"goto failed: {str(e).splitlines()[0][:160]}",
                             "elapsed": round(time.monotonic() - t0, 1),
@@ -627,7 +632,8 @@ async def _anchor_class(page) -> str:
 async def _get_token(page) -> str:
     for _ in range(10):
         token = await page.evaluate(
-            "() => document.querySelector('#g-recaptcha-response')?.value || ''")
+            "() => (document.querySelector('#g-recaptcha-response')?.value"
+                     " || document.querySelector('textarea[name=\"g-recaptcha-response\"]')?.value || '')")
         if token:
             return token
         await asyncio.sleep(1)
@@ -689,7 +695,7 @@ async def solve_recaptcha_v2(sitekey: str, url: str,
                     route_glob(url),
                     lambda r: r.fulfill(body=page_data, status=200, content_type="text/html"),
                 )
-                await page.goto(url, wait_until="domcontentloaded", timeout=45000)
+                await page.goto(url, wait_until="domcontentloaded", timeout=90000)
                 # wait for recaptcha iframe
                 try:
                     await page.wait_for_selector(_ANCHOR_IFRAME, timeout=20000)
@@ -787,7 +793,9 @@ async def solve_recaptcha_v2_realpage(url: str, sitekey: str = None,
                                       post_fetch: list = None,
                                       timeout_s: int = 60,
                                       proxy: str = None,
-                                      classifier: str = None) -> dict:
+                                      classifier: str = None,
+                                      storage_state=None,
+                                      enterprise: bool = False) -> dict:
     """Solve v2 on the REAL page (no route intercept) — the realistic production path.
 
     Navigates the actual site, runs optional pre_actions, clicks the checkbox in the
@@ -807,25 +815,89 @@ async def solve_recaptcha_v2_realpage(url: str, sitekey: str = None,
         async with await cloakbrowser.launch_async(**_browser_kwargs(proxy)) as browser:
             page = await browser.new_page()
             try:
-                await page.goto(url, wait_until="domcontentloaded", timeout=45000)
+                await page.goto(url, wait_until="domcontentloaded", timeout=90000)
                 if pre_actions:
                     await run_pre_actions(page, pre_actions)
                     await asyncio.sleep(2)
-                if sitekey:  # inject our widget if the page doesn't embed one
+                # Hanya inject widget jika page TIDAK embed satu sendiri.
+                # Mobrog/Toluna embed .g-recaptcha dengan session mereka; inject
+                # widget kedua menyebabkan frame_locator klik widget kosong.
+                _has_widget = False
+                try:
+                    _has_widget = (await page.locator(
+                        ".g-recaptcha, iframe[src*='recaptcha']").count()) > 0
+                except Exception:
+                    pass
+                if _has_widget:
+                    log.info("realpage: page dah ada widget reCAPTCHA - skip inject")
+
+                if sitekey and not _has_widget:  # inject our widget if the page doesn't embed one
                     await page.evaluate(
                         "(k) => { const d=document.createElement('div');"
                         " d.className='g-recaptcha'; d.setAttribute('data-sitekey',k);"
                         " document.body.prepend(d);"
                         " const s=document.createElement('script');"
-                        " s.src='https://www.google.com/recaptcha/api.js';"
+                        " s.src='https://www.google.com/recaptcha/' + (window.__rc_ent ? 'enterprise.js' : 'api.js');"
                         " document.head.appendChild(s); }", sitekey)
                     await asyncio.sleep(3)
 
+                # Tunggu iframe anchor benar-benar masuk DOM. Enterprise deployments
+                # (Mobrog, Toluna) render the widget seconds after load; the old code
+                # clicked immediately and hit "element not found in DOM".
+                _anchor_ready = False
+                for _w in range(20):
+                    try:
+                        if await page.locator(_ANCHOR_IFRAME).count() > 0:
+                            _anchor_ready = True
+                            break
+                    except Exception:
+                        pass
+                    await asyncio.sleep(1)
+                if not _anchor_ready:
+                    log.warning("realpage: anchor iframe tidak muncul dalam 20s")
+
+                # Click mesti ada had KERAS. cloakbrowser human-click buat stability
+                # check berulang; widget reCAPTCHA beranimasi berterusan -> click
+                # tergantung tanpa had dan `timeout` tak terpakai.
+                _clicked = False
                 try:
-                    await page.frame_locator(_ANCHOR_IFRAME).locator(
-                        "#recaptcha-anchor").click(timeout=8000)
+                    await asyncio.wait_for(
+                        page.frame_locator(_ANCHOR_IFRAME).locator(
+                            "#recaptcha-anchor").click(timeout=8000),
+                        timeout=20,
+                    )
+                    _clicked = True
+                    log.info("realpage: checkbox diklik (human-click)")
                 except Exception as e:
-                    log.warning("realpage checkbox click: %s", str(e).splitlines()[0])
+                    log.warning("realpage human-click gagal: %s", str(e).splitlines()[0])
+
+                if not _clicked:
+                    # Fallback: JS click terus dalam frame anchor. Tiada stability check.
+                    try:
+                        _anchor_fr = await _find_frame(page, "recaptcha") 
+                        for _fr in page.frames:
+                            _u = _fr.url or ""
+                            if "recaptcha" in _u and "anchor" in _u:
+                                _anchor_fr = _fr
+                                break
+                        if _anchor_fr:
+                            await asyncio.wait_for(
+                                _anchor_fr.evaluate(
+                                    """() => {
+                                        const a = document.querySelector('#recaptcha-anchor');
+                                        if (!a) return 'no-anchor';
+                                        a.click();
+                                        return 'clicked';
+                                    }"""),
+                                timeout=15,
+                            )
+                            _clicked = True
+                            log.info("realpage: checkbox diklik (JS fallback)")
+                    except Exception as e:
+                        log.warning("realpage JS-click gagal: %s", str(e).splitlines()[0])
+
+                if not _clicked:
+                    log.warning("realpage: checkbox TIDAK dapat diklik - teruskan polling")
 
                 token = ""
                 image_attempts = 0
@@ -834,16 +906,31 @@ async def solve_recaptcha_v2_realpage(url: str, sitekey: str = None,
                 while time.monotonic() < deadline:
                     await asyncio.sleep(1)
                     token = await page.evaluate(
-                        "() => document.querySelector('#g-recaptcha-response')?.value || ''")
+                        "() => (document.querySelector('#g-recaptcha-response')?.value"
+                     " || document.querySelector('textarea[name=\"g-recaptcha-response\"]')?.value || '')")
                     if token:
                         break
 
                     # Image bframe opened after checkbox click — solve the grid.
                     # Retry on fresh challenges after a failed verify.
+                    # `count()` TIDAK retry: grid render lewat menyebabkan blok ini
+                    # di-skip senyap. Tunggu sampai 15s untuk table muncul.
+                    _grid_tables = 0
+                    if image_attempts < max_image_attempts and await _find_frame(page, "/bframe"):
+                        for _t in range(15):
+                            try:
+                                _grid_tables = await page.frame_locator(
+                                    _BFRAME_IFRAME).locator("table").count()
+                            except Exception:
+                                _grid_tables = 0
+                            if _grid_tables > 0:
+                                break
+                            await asyncio.sleep(1)
+                        if _grid_tables == 0:
+                            log.info("v2 realpage: bframe ada tapi table grid tak muncul (15s)")
+
                     if (image_attempts < max_image_attempts
-                            and await _find_frame(page, "/bframe")
-                            and await page.frame_locator(_BFRAME_IFRAME).locator(
-                                "table").count() > 0):
+                            and _grid_tables > 0):
                         image_attempts += 1
                         log.info("v2 realpage: bframe image challenge detected "
                                  "(attempt %d/%d)", image_attempts, max_image_attempts)
