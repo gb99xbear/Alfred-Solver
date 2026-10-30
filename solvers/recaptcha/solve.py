@@ -20,6 +20,7 @@ heavily penalised surface.
 import asyncio
 import logging
 import os
+import re
 import time
 from pathlib import Path
 
@@ -629,16 +630,61 @@ async def _anchor_class(page) -> str:
         return ""
 
 
-async def _get_token(page) -> str:
+_RRESP_RE = re.compile(r'\["rresp",\s*"([^"]+)"')
+
+
+async def _install_token_capture(page) -> dict:
+    """Pull the g-recaptcha-response straight off Google's own response.
+
+    reload / userverify carry the token as ["rresp","<token>"]. SPAs read the
+    token from the widget and never write the DOM textarea, so a textarea-only
+    reader reports "no token" on challenges that actually succeeded.
+    """
+    box: dict = {}
+
+    async def _on_resp(r):
+        u = r.url or ""
+        if "recaptcha/api2/" not in u and "/recaptcha/enterprise/" not in u:
+            return
+        # ONLY the two responses that carry a FINAL token. The anchor response
+        # also matches rresp but with an initial/placeholder value, which the
+        # target rejects with "Invalid captcha".
+        if not any(k in u for k in ("reload", "userverify")):
+            return
+        try:
+            txt = await r.text()
+        except Exception:
+            return
+        m = _RRESP_RE.search(txt)
+        if m and m.group(1):
+            box["token"] = m.group(1)
+            box["src"] = u.split("?")[0].rsplit("/", 1)[-1]
+            box["ts"] = time.monotonic()
+            log.info("token capture: src=%s len=%d", box["src"], len(m.group(1)))
+
+    page.on("response", lambda r: asyncio.create_task(_on_resp(r)))
+    return box
+
+
+async def _get_token(page, box: dict = None) -> str:
+    """Token from (a) the response intercept, (b) grecaptcha.getResponse(), (c) DOM."""
     for _ in range(10):
-        token = await page.evaluate(
+        if box and box.get("token"):
+            return box["token"]
+        for expr in (
+            "() => (window.grecaptcha && window.grecaptcha.getResponse)"
+            " ? (window.grecaptcha.getResponse(0) || window.grecaptcha.getResponse() || '') : ''",
             "() => (document.querySelector('#g-recaptcha-response')?.value"
-                     " || document.querySelector('textarea[name=\"g-recaptcha-response\"]')?.value || '')")
-        if token:
-            return token
+            " || document.querySelector('textarea[name=\"g-recaptcha-response\"]')?.value || '')",
+        ):
+            try:
+                token = await page.evaluate(expr)
+            except Exception:
+                token = ""
+            if token:
+                return token
         await asyncio.sleep(1)
     return ""
-
 
 async def _audio_blocked(page) -> bool:
     """True if reCAPTCHA is denying the audio fallback (IP/automation block)."""
@@ -814,6 +860,7 @@ async def solve_recaptcha_v2_realpage(url: str, sitekey: str = None,
     async with _solve_lock:
         async with await cloakbrowser.launch_async(**_browser_kwargs(proxy)) as browser:
             page = await browser.new_page()
+            _tcap = await _install_token_capture(page)
             try:
                 await page.goto(url, wait_until="domcontentloaded", timeout=90000)
                 if pre_actions:
@@ -904,6 +951,25 @@ async def solve_recaptcha_v2_realpage(url: str, sitekey: str = None,
                 max_image_attempts = 4
                 deadline = time.monotonic() + timeout_s
                 while time.monotonic() < deadline:
+                    token = _tcap.get("token") or ""
+                    # A token captured while the challenge bframe is still open is
+                    # NOT final (Google escalates after the first reload rresp and
+                    # invalidates it) - the target answers "Invalid captcha".
+                    if token:
+                        try:
+                            if await _find_frame(page, "/bframe"):
+                                token = ""
+                        except Exception:
+                            pass
+                    if not token:
+                        try:
+                            token = await page.evaluate(
+                                "() => (window.grecaptcha && window.grecaptcha.getResponse)"
+                                " ? (window.grecaptcha.getResponse(0) || window.grecaptcha.getResponse() || '') : ''")
+                        except Exception:
+                            token = ""
+                    if token:
+                        break
                     await asyncio.sleep(1)
                     token = await page.evaluate(
                         "() => (document.querySelector('#g-recaptcha-response')?.value"

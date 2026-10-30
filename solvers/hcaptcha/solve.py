@@ -210,7 +210,7 @@ async def solve_hcaptcha(sitekey: str, url: str, max_attempts: int = 15,
                         if not solved:
                             await _close_challenge(page)
 
-                    token = await _get_hcaptcha_token(page, max_attempts=8)
+                    token = await _get_hcaptcha_token(page, max_attempts=25)
                     if token:
                         return {"token": token, "expires_in": 120,
                                 "elapsed": round(time.monotonic() - t0, 1),

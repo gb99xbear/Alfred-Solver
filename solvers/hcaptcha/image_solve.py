@@ -814,7 +814,10 @@ async def solve_hcaptcha_challenge(fr, page, keypool, max_pages: int = 5) -> boo
         _log_outcome("DRAG", target, solved,
                      model="gemini-first" if solved else "none",
                      detail="no submit" if not solved else "")
-        if not solved:
+        if solved:
+            await asyncio.sleep(1.5)
+            await _click_submit(fr)  # Click Verify after drag succeeds
+        else:
             await _click_submit(fr)  # Skip if drag fails
         return solved
 
@@ -904,8 +907,9 @@ async def solve_hcaptcha_challenge(fr, page, keypool, max_pages: int = 5) -> boo
         clicked = await _click_submit(fr)
         if not clicked:
             return False
-        if btn_text.lower() in ("skip", "跳过", "huppel", "ohita", "überspringen"):
-            return False  # user skipped, not solved
+        # If positives were found, button advanced to Next/Verify (not skip)
+        if not positives:
+            return False  # no matches found, skipped
         await asyncio.sleep(2)
 
     # After last page, check for "Verify" button

@@ -1009,18 +1009,36 @@ async def _dispatch(req: SolveRequest) -> dict:
                     )
                     r["elapsed"] = (r.get("elapsed") or 0) + (r2.get("elapsed") or 0)
     elif version == "v2":
-        if req.real_page:
-            actions, fetches = _extract(req)
-            r = await solve_recaptcha_v2_realpage(
-                req.url, req.sitekey, actions, fetches,
-                timeout_s=req.timeout_s, proxy=req.proxy,
-                classifier=req.classifier,
-                storage_state=req.storage_state,
-                enterprise=bool(req.enterprise))
-        else:
-            r = await solve_recaptcha_v2(
-                req.sitekey, req.url, enterprise=req.enterprise,
-                proxy=req.proxy, classifier=req.classifier)
+        r = None
+        # Firefox engine first: the Chromium checkbox session gets escalated to an
+        # image challenge on this stack (and its pre-challenge token is rejected by
+        # targets as "Invalid captcha"), while Firefox passes the widget silently.
+        if not req.enterprise and os.environ.get("RECAPTCHA_V2_ENGINE", "firefox") == "firefox":
+            try:
+                from solvers.recaptcha.firefox_v2 import solve_recaptcha_v2_firefox
+                _actions, _fetches = _extract(req)
+                _rf = await solve_recaptcha_v2_firefox(
+                    req.url, req.sitekey, proxy=req.proxy,
+                    timeout_s=float(req.timeout_s or 150), pre_actions=_actions)
+                if _rf.get("token"):
+                    r = _rf
+                else:
+                    log.warning("recaptcha v2 firefox engine: %s", _rf.get("error"))
+            except Exception as _e:
+                log.warning("recaptcha v2 firefox engine crashed: %s", str(_e)[:160])
+        if r is None:
+            if req.real_page:
+                actions, fetches = _extract(req)
+                r = await solve_recaptcha_v2_realpage(
+                    req.url, req.sitekey, actions, fetches,
+                    timeout_s=req.timeout_s, proxy=req.proxy,
+                    classifier=req.classifier,
+                    storage_state=req.storage_state,
+                    enterprise=bool(req.enterprise))
+            else:
+                r = await solve_recaptcha_v2(
+                    req.sitekey, req.url, enterprise=req.enterprise,
+                    proxy=req.proxy, classifier=req.classifier)
     else:
         raise HTTPException(400, f"Unknown version: {version}. Use v3|invisible|v2")
     if r.get("token") and "solved" not in r:
